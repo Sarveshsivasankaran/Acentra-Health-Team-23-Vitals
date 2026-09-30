@@ -1,3 +1,4 @@
+com\cache\eviction\LRUEvictionPolicy$Node.class
 com\cache\config\CacheConfig.class
 com\cache\controller\CacheController.class
 com\cache\eviction\EvictionPolicy.class

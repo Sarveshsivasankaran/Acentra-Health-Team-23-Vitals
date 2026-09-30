@@ -31,20 +31,22 @@ A high-performance, thread-safe, in-memory Java Custom Cache Library with select
                     EVICTION POLICY  (interface)
                      ┌─────┴─────┐
                      ▼           ▼
-                    LRU         LFU
+               O(1) LRU      O(1) LFU
 ```
 
 ## Thread-Safety
 
 The cache guarantees thread safety by wrapping all compound operations (check → evict → insert) in a single `ReentrantLock`. While we use `ConcurrentHashMap` for storage, the lock is what truly ensures atomicity of these multi-step cache operations. `ConcurrentHashMap` ensures safe read-only snapshots (for listing entries) and prevents standard concurrent modification exceptions during sweeps. Atomic counters (`AtomicLong`, `LongAdder`) track metrics and sequential access reliably across multiple threads. 
 
-## Eviction Policies
+## Eviction Policies (Caffeine-Inspired O(1) Optimization)
+
+Instead of the standard naive O(n) scan, eviction structures have been optimized to O(1) structures reflecting the high-performance design principles of modern caching libraries like Caffeine.
 
 ### LRU (Least Recently Used)
-The LRU policy evicts the entry with the oldest `lastAccessSeq` (the smallest monotonic sequence number generated upon access or creation). Using a monotonic sequence guarantees deterministic tie-breaking even when operations happen in the same millisecond. Time complexity for eviction scan is O(n) (deliberate MVP choice to keep it simple, while a LinkedHashMap or Doubly-Linked List could provide O(1)).
+The LRU policy uses an **O(1) Custom Doubly Linked List** tracking the chronological order of accesses. The oldest entry sits at the head, and the newest sits at the tail. Eviction instantly pops the head, and reads push the node to the tail, achieving O(1) operations.
 
 ### LFU (Least Frequently Used)
-The LFU policy evicts the entry with the smallest `accessCount`. In the event of a tie (multiple entries with the same minimum frequency), it breaks the tie by using the oldest `lastAccessSeq` (falling back to LRU). Time complexity for eviction scan is O(n) (could be improved with O(1) frequency buckets in a full implementation).
+The LFU policy uses **O(1) Frequency Buckets** paired with a dynamically advancing `minFreq` pointer. Each bucket is represented as a `LinkedHashSet` which naturally resolves ties using LRU logic (insertion order). On reads, entries are hopped from bucket `freq` to `freq + 1` in constant time. 
 
 ## TTL (Time To Live)
 
@@ -146,4 +148,3 @@ curl -X POST "http://localhost:8080/api/cache/demo/compare?pattern=zipf"
 
 ## Limitations
 * Single-node, purely in-memory cache (no persistence).
-* Eviction uses O(n) scanning of the map values. For a production-ready cache, O(1) structures like doubly-linked lists or frequency buckets would be required.

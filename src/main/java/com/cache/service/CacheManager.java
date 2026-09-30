@@ -52,6 +52,7 @@ public class CacheManager {
             
             if (entry.isExpired(now)) {
                 store.remove(key);
+                policy.onRemove(entry);
                 metrics.expiration();
                 metrics.miss();
                 response.setStatus("MISS");
@@ -61,6 +62,7 @@ public class CacheManager {
             
             // Valid hit
             entry.recordAccess(now, seqCounter.incrementAndGet());
+            policy.onGet(entry);
             metrics.hit();
             response.setStatus("HIT");
             response.setValue(entry.getValue());
@@ -83,6 +85,8 @@ public class CacheManager {
                 existing.setExpiryTime(expiryTime);
                 existing.setAccessCount(0);
                 existing.recordAccess(now, seqCounter.incrementAndGet());
+                
+                policy.onPut(existing); // Update O(1) structures
                 return new PutResult(true, null);
             }
             
@@ -94,7 +98,7 @@ public class CacheManager {
                 
                 // If still at or over capacity, evict one
                 if (store.size() >= capacity) {
-                    victimKey = policy.evict(store.values());
+                    victimKey = policy.evict();
                     if (victimKey != null) {
                         store.remove(victimKey);
                         metrics.eviction();
@@ -104,6 +108,7 @@ public class CacheManager {
             
             CacheEntry newEntry = new CacheEntry(key, value, now, expiryTime, 0, now, seqCounter.incrementAndGet());
             store.put(key, newEntry);
+            policy.onPut(newEntry);
             
             return new PutResult(true, victimKey);
         } finally {
@@ -114,7 +119,12 @@ public class CacheManager {
     public boolean delete(String key) {
         lock.lock();
         try {
-            return store.remove(key) != null;
+            CacheEntry removed = store.remove(key);
+            if (removed != null) {
+                policy.onRemove(removed);
+                return true;
+            }
+            return false;
         } finally {
             lock.unlock();
         }
@@ -124,6 +134,7 @@ public class CacheManager {
         lock.lock();
         try {
             store.clear();
+            policy.clear();
         } finally {
             lock.unlock();
         }
@@ -134,6 +145,15 @@ public class CacheManager {
         try {
             this.policyType = type;
             this.policy = PolicyFactory.create(type);
+            
+            // Re-seed the new policy with existing entries sorted by lastAccessSeq (oldest to newest)
+            List<CacheEntry> entries = new ArrayList<>(store.values());
+            entries.sort((e1, e2) -> Long.compare(e1.getLastAccessSeq(), e2.getLastAccessSeq()));
+            for (CacheEntry e : entries) {
+                // For LFU buckets, we might want to temporarily restore their frequencies 
+                // but since entry.getAccessCount() retains original frequencies, onPut will place them in the correct bucket
+                this.policy.onPut(e);
+            }
         } finally {
             lock.unlock();
         }
@@ -150,12 +170,12 @@ public class CacheManager {
             if (store.size() > capacity) {
                 removeExpiredUnderLock(now);
                 while (store.size() > capacity) {
-                    String victimKey = policy.evict(store.values());
+                    String victimKey = policy.evict();
                     if (victimKey != null) {
                         store.remove(victimKey);
                         metrics.eviction();
                     } else {
-                        break; // nothing left to evict?
+                        break; 
                     }
                 }
             }
@@ -167,7 +187,6 @@ public class CacheManager {
     public List<EntryView> listEntries() {
         long now = clock.getAsLong();
         List<EntryView> result = new ArrayList<>();
-        // Read-only scan; locking optional but safe to do under lock for absolute point-in-time consistency
         lock.lock();
         try {
             for (CacheEntry entry : store.values()) {
@@ -200,7 +219,6 @@ public class CacheManager {
     
     private int removeExpiredUnderLock(long now) {
         int removedCount = 0;
-        // avoid Iterator concurrent modifications by making a list or using map.entrySet().removeIf
         List<String> toRemove = new ArrayList<>();
         for (CacheEntry entry : store.values()) {
             if (entry.isExpired(now)) {
@@ -208,17 +226,17 @@ public class CacheManager {
             }
         }
         for (String k : toRemove) {
-            store.remove(k);
-            metrics.expiration();
-            removedCount++;
+            CacheEntry removed = store.remove(k);
+            if (removed != null) {
+                policy.onRemove(removed);
+                metrics.expiration();
+                removedCount++;
+            }
         }
         return removedCount;
     }
 
     public CacheMetrics snapshotMetrics() {
-        // Return a fresh copy or the same metrics object for JSON serialisation
-        // The prompt says snapshotMetrics() returns hits, misses, etc.
-        // We will just map it in the controller, but exposing getters here.
         return this.metrics;
     }
     
