@@ -67,9 +67,7 @@ public class CacheManager {
         CacheEntry entry = hotCache.get(key);
         if (entry != null) {
             if (entry.isExpired(now)) {
-                hotCache.remove(key);
-                policy.onRemove(entry);
-                logicalSize.decrementAndGet();
+                internalDelete(key, now);
                 metrics.expiration();
                 metrics.miss();
                 return missResponse(response, "EXPIRED");
@@ -110,9 +108,7 @@ public class CacheManager {
 
     private CacheResponse processLowerTierHit(CacheEntry entry, long now, CacheResponse response) {
         if (entry.isExpired(now)) {
-            // Lazily insert tombstone to mask it
-            memTable.put(entry.getKey(), CacheEntry.tombstone(entry.getKey(), now));
-            logicalSize.decrementAndGet();
+            internalDelete(entry.getKey(), now);
             metrics.expiration();
             metrics.miss();
             return missResponse(response, "EXPIRED");
@@ -196,8 +192,9 @@ public class CacheManager {
         while (logicalSize.get() > capacity) {
             victimKey = policy.evict();
             if (victimKey != null) {
-                internalDelete(victimKey, now);
-                metrics.eviction();
+                if (internalDelete(victimKey, now)) {
+                    metrics.eviction();
+                }
             } else {
                 break;
             }
@@ -206,43 +203,37 @@ public class CacheManager {
         return new PutResult(true, victimKey);
     }
     
-    private void internalDelete(String key, long now) {
-        hotCache.remove(key);
+    private synchronized boolean internalDelete(String key, long now) {
+        boolean wasLive = false;
+        CacheEntry hot = hotCache.remove(key);
+        if (hot != null) {
+            wasLive = true;
+        } else {
+            CacheEntry mem = memTable.get(key);
+            if (mem != null && !mem.isTombstone()) {
+                wasLive = true;
+            } else if (mem == null) {
+                CacheEntry run = runManager.getNewest(key);
+                if (run != null && !run.isTombstone()) {
+                    wasLive = true;
+                }
+            }
+        }
+        
         CacheEntry tombstone = CacheEntry.tombstone(key, now);
         tombstone.setVersion(now);
         memTable.put(key, tombstone);
-        logicalSize.decrementAndGet();
+        
+        if (wasLive) {
+            logicalSize.decrementAndGet();
+            policy.onRemove(tombstone);
+        }
+        return wasLive;
     }
     
     public synchronized boolean delete(String key) {
         long now = clock.getAsLong();
-        boolean found = false;
-        
-        CacheEntry hotEntry = hotCache.remove(key);
-        if (hotEntry != null) {
-            policy.onRemove(hotEntry);
-            found = true;
-        }
-        
-        CacheEntry memExisting = memTable.get(key);
-        if (memExisting != null && !memExisting.isTombstone()) {
-            policy.onRemove(memExisting);
-            found = true;
-        } else if (memExisting == null) {
-            CacheEntry runExisting = runManager.getNewest(key);
-            if (runExisting != null && !runExisting.isTombstone()) {
-                policy.onRemove(runExisting);
-                found = true;
-            }
-        }
-        
-        if (found) {
-            logicalSize.decrementAndGet();
-        }
-        
-        CacheEntry tombstone = CacheEntry.tombstone(key, now);
-        tombstone.setVersion(now);
-        memTable.put(key, tombstone);
+        boolean found = internalDelete(key, now);
         
         if (memTable.isOverThreshold()) {
             memTable.flush(now);
@@ -282,8 +273,9 @@ public class CacheManager {
         while (logicalSize.get() > capacity) {
             String victimKey = policy.evict();
             if (victimKey != null) {
-                internalDelete(victimKey, now);
-                metrics.eviction();
+                if (internalDelete(victimKey, now)) {
+                    metrics.eviction();
+                }
             } else {
                 break;
             }
@@ -341,9 +333,10 @@ public class CacheManager {
             }
         }
         for (String k : toRemove) {
-            internalDelete(k, now);
-            metrics.expiration();
-            removed++;
+            if (internalDelete(k, now)) {
+                metrics.expiration();
+                removed++;
+            }
         }
         return removed;
     }
