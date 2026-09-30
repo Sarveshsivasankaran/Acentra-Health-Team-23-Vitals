@@ -67,9 +67,7 @@ public class CacheManager {
         CacheEntry entry = hotCache.get(key);
         if (entry != null) {
             if (entry.isExpired(now)) {
-                hotCache.remove(key);
-                policy.onRemove(entry);
-                logicalSize.decrementAndGet();
+                internalDelete(key, now);
                 metrics.expiration();
                 metrics.miss();
                 return missResponse(response, "EXPIRED");
@@ -110,9 +108,7 @@ public class CacheManager {
 
     private CacheResponse processLowerTierHit(CacheEntry entry, long now, CacheResponse response) {
         if (entry.isExpired(now)) {
-            // Lazily insert tombstone to mask it
-            memTable.put(entry.getKey(), CacheEntry.tombstone(entry.getKey(), now));
-            logicalSize.decrementAndGet();
+            internalDelete(entry.getKey(), now);
             metrics.expiration();
             metrics.miss();
             return missResponse(response, "EXPIRED");
@@ -196,8 +192,9 @@ public class CacheManager {
         while (logicalSize.get() > capacity) {
             victimKey = policy.evict();
             if (victimKey != null) {
-                internalDelete(victimKey, now);
-                metrics.eviction();
+                if (internalDelete(victimKey, now)) {
+                    metrics.eviction();
+                }
             } else {
                 break;
             }
@@ -206,43 +203,37 @@ public class CacheManager {
         return new PutResult(true, victimKey);
     }
     
-    private void internalDelete(String key, long now) {
-        hotCache.remove(key);
+    private synchronized boolean internalDelete(String key, long now) {
+        boolean wasLive = false;
+        CacheEntry hot = hotCache.remove(key);
+        if (hot != null) {
+            wasLive = true;
+        } else {
+            CacheEntry mem = memTable.get(key);
+            if (mem != null && !mem.isTombstone()) {
+                wasLive = true;
+            } else if (mem == null) {
+                CacheEntry run = runManager.getNewest(key);
+                if (run != null && !run.isTombstone()) {
+                    wasLive = true;
+                }
+            }
+        }
+        
         CacheEntry tombstone = CacheEntry.tombstone(key, now);
         tombstone.setVersion(now);
         memTable.put(key, tombstone);
-        logicalSize.decrementAndGet();
+        
+        if (wasLive) {
+            logicalSize.decrementAndGet();
+            policy.onRemove(tombstone);
+        }
+        return wasLive;
     }
     
     public synchronized boolean delete(String key) {
         long now = clock.getAsLong();
-        boolean found = false;
-        
-        CacheEntry hotEntry = hotCache.remove(key);
-        if (hotEntry != null) {
-            policy.onRemove(hotEntry);
-            found = true;
-        }
-        
-        CacheEntry memExisting = memTable.get(key);
-        if (memExisting != null && !memExisting.isTombstone()) {
-            policy.onRemove(memExisting);
-            found = true;
-        } else if (memExisting == null) {
-            CacheEntry runExisting = runManager.getNewest(key);
-            if (runExisting != null && !runExisting.isTombstone()) {
-                policy.onRemove(runExisting);
-                found = true;
-            }
-        }
-        
-        if (found) {
-            logicalSize.decrementAndGet();
-        }
-        
-        CacheEntry tombstone = CacheEntry.tombstone(key, now);
-        tombstone.setVersion(now);
-        memTable.put(key, tombstone);
+        boolean found = internalDelete(key, now);
         
         if (memTable.isOverThreshold()) {
             memTable.flush(now);
@@ -264,13 +255,13 @@ public class CacheManager {
         this.policyType = type;
         this.policy = PolicyFactory.create(type);
         
-        List<CacheEntry> allEntries = new ArrayList<>(hotCache.values());
-        
-        // Add from memTable (skipping tombstones)
-        // memTable is private, but we can add a method or just rely on the API
-        // For testing purposes, we can just add a getter or use the fact that they are accessible if we exposed them.
-        // Let's iterate using an internal method if possible.
-        // Actually, for MVP it's fine if setPolicy only tracks hotCache, we just need to fix PolicySwitchTest to only test what it tracks, OR we can add a getter to MemTable.
+        // Repopulate the new policy with all currently live entries
+        for (EntryView view : listEntries()) {
+            if ("LIVE".equals(view.getStatus())) {
+                CacheEntry dummy = new CacheEntry(view.getKey(), view.getValue(), 0, 0, view.getAccessCount(), view.getLastAccessTime(), 0);
+                this.policy.onPut(dummy);
+            }
+        }
     }
     
     public synchronized void setCapacity(int newCapacity) {
@@ -282,8 +273,9 @@ public class CacheManager {
         while (logicalSize.get() > capacity) {
             String victimKey = policy.evict();
             if (victimKey != null) {
-                internalDelete(victimKey, now);
-                metrics.eviction();
+                if (internalDelete(victimKey, now)) {
+                    metrics.eviction();
+                }
             } else {
                 break;
             }
@@ -292,25 +284,42 @@ public class CacheManager {
     
     public List<EntryView> listEntries() {
         long now = clock.getAsLong();
-        List<EntryView> result = new ArrayList<>();
-        for (CacheEntry entry : hotCache.values()) {
-            addEntryView(result, entry, now);
+        java.util.Map<String, EntryView> latestEntries = new java.util.HashMap<>();
+
+        List<ImmutableRun> runs = runManager.getRuns();
+        for (int i = runs.size() - 1; i >= 0; i--) {
+            ImmutableRun run = runs.get(i);
+            for (CacheEntry entry : run.getEntries()) {
+                addEntryViewToMap(latestEntries, entry, now, "L3 (Cold)");
+            }
         }
-        // Simplified for MVP UI
-        return result; 
+
+        for (CacheEntry entry : memTable.getEntries()) {
+            addEntryViewToMap(latestEntries, entry, now, "L2 (Warm)");
+        }
+
+        for (CacheEntry entry : hotCache.values()) {
+            addEntryViewToMap(latestEntries, entry, now, "L1 (Hot)");
+        }
+
+        return new ArrayList<>(latestEntries.values());
     }
     
-    private void addEntryView(List<EntryView> result, CacheEntry entry, long now) {
-        if (entry.isTombstone()) return;
+    private void addEntryViewToMap(java.util.Map<String, EntryView> map, CacheEntry entry, long now, String tier) {
+        if (entry.isTombstone()) {
+            map.remove(entry.getKey());
+            return;
+        }
         String status = entry.isExpired(now) ? "EXPIRED" : "LIVE";
         long remainingSec = entry.remainingTtlSeconds(now);
-        result.add(new EntryView(
+        map.put(entry.getKey(), new EntryView(
             entry.getKey(), 
             entry.getValue(), 
             remainingSec, 
             entry.getAccessCount(), 
             entry.getLastAccessTime(), 
-            status
+            status,
+            tier
         ));
     }
     
@@ -318,15 +327,18 @@ public class CacheManager {
         long now = clock.getAsLong();
         int removed = 0;
         List<String> toRemove = new ArrayList<>();
-        for (CacheEntry entry : hotCache.values()) {
-            if (entry.isExpired(now)) {
-                toRemove.add(entry.getKey());
+        
+        for (EntryView view : listEntries()) {
+            if ("EXPIRED".equals(view.getStatus())) {
+                toRemove.add(view.getKey());
             }
         }
+        
         for (String k : toRemove) {
-            internalDelete(k, now);
-            metrics.expiration();
-            removed++;
+            if (internalDelete(k, now)) {
+                metrics.expiration();
+                removed++;
+            }
         }
         return removed;
     }

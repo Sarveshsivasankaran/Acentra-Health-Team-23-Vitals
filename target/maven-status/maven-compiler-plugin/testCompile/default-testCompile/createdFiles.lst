@@ -1,7 +1,0 @@
-com\cache\ConcurrencyTest.class
-com\cache\LFUEvictionTest.class
-com\cache\PolicySwitchTest.class
-com\cache\LRUEvictionTest.class
-com\cache\TTLTest.class
-com\cache\MetricsTest.class
-com\cache\ApiSmokeTest.class
