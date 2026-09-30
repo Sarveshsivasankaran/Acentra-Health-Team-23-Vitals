@@ -1,3 +1,7 @@
 
 # Maven output
 target/
+
+# Node/Frontend
+node_modules/
+.env
