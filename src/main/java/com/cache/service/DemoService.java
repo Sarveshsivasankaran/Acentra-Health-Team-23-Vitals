@@ -22,49 +22,69 @@ public class DemoService {
     }
 
     public Map<String, Object> runSampleDemo() {
-        cacheManager.setCapacity(3);
+        int cap = cacheManager.getCapacity();
         cacheManager.clear();
         cacheManager.getMetrics().reset();
 
         List<OperationLog> logs = new ArrayList<>();
-        logs.add(doPut("A", "valA", 60));
-        logs.add(doPut("B", "valB", 60));
-        logs.add(doPut("C", "valC", 60));
-        logs.add(doGet("A"));
-        logs.add(doGet("A"));
-        logs.add(doGet("B"));
-        logs.add(doGet("A"));
-        logs.add(doGet("C"));
-        logs.add(doGet("X"));
-        logs.add(doGet("X"));
-        logs.add(doPut("D", "valD", 60));
-        logs.add(doGet("A"));
-        logs.add(doGet("B"));
+        // Fill cache up to capacity
+        for (int i = 1; i <= cap; i++) {
+            logs.add(doPut("Key" + i, "val" + i, 60));
+        }
+        
+        // Some GETs
+        if (cap >= 3) {
+            logs.add(doGet("Key1"));
+            logs.add(doGet("Key1"));
+            logs.add(doGet("Key2"));
+            logs.add(doGet("Key3"));
+            logs.add(doGet("Key1"));
+        } else {
+            logs.add(doGet("Key1"));
+            logs.add(doGet("Key1"));
+        }
+        
+        // Extra PUT to trigger eviction
+        logs.add(doPut("Key" + (cap + 1), "val" + (cap + 1), 60));
+        
+        // Misses
+        logs.add(doGet("KeyMiss1"));
+        logs.add(doGet("KeyMiss2"));
+        
+        // Get old keys
+        logs.add(doGet("Key1"));
+        if (cap >= 2) logs.add(doGet("Key2"));
 
         Map<String, Object> result = new LinkedHashMap<>();
-        result.put("message", "Set capacity 3, cleared cache, reset metrics.");
+        result.put("message", "Cleared cache, reset metrics. Generated sample load for capacity " + cap);
         result.put("logs", logs);
         return result;
     }
 
     public Map<String, Object> runEvictionDemo() {
-        cacheManager.setCapacity(3);
+        int cap = cacheManager.getCapacity();
         cacheManager.clear();
         cacheManager.getMetrics().reset();
 
         List<OperationLog> logs = new ArrayList<>();
-        logs.add(doPut("A", "valA", 60));
-        logs.add(doPut("B", "valB", 60));
-        logs.add(doPut("C", "valC", 60));
-        logs.add(doGet("A"));
-        logs.add(doGet("A"));
-        logs.add(doGet("A"));
-        logs.add(doGet("B"));
-        logs.add(doGet("C"));
-        logs.add(doPut("D", "valD", 60));
+        // Fill cache
+        for (int i = 1; i <= cap; i++) {
+            logs.add(doPut("Key" + i, "val" + i, 60));
+        }
+        
+        // Make Key1 hot
+        for (int i = 0; i < 3; i++) {
+            logs.add(doGet("Key1"));
+        }
+        
+        if (cap >= 2) logs.add(doGet("Key2"));
+        
+        // Overfill the cache to trigger evictions
+        logs.add(doPut("Key" + (cap + 1), "val" + (cap + 1), 60));
+        logs.add(doPut("Key" + (cap + 2), "val" + (cap + 2), 60));
 
         Map<String, Object> result = new LinkedHashMap<>();
-        result.put("message", "Set capacity 3, cleared cache, reset metrics.");
+        result.put("message", "Cleared cache, reset metrics. Forced eviction for capacity " + cap);
         result.put("logs", logs);
         return result;
     }
