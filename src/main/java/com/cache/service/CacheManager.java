@@ -66,15 +66,15 @@ public class CacheManager {
         // 1. Check Hot Cache
         CacheEntry entry = hotCache.get(key);
         if (entry != null) {
+            if (entry.isTombstone()) {
+                metrics.miss();
+                return missResponse(response, "NOT_FOUND");
+            }
             if (entry.isExpired(now)) {
                 internalDelete(key, now);
                 metrics.expiration();
                 metrics.miss();
                 return missResponse(response, "EXPIRED");
-            }
-            if (entry.isTombstone()) {
-                metrics.miss();
-                return missResponse(response, "NOT_FOUND");
             }
             entry.recordAccess(now, seqCounter.incrementAndGet());
             policy.onGet(entry);
@@ -107,15 +107,15 @@ public class CacheManager {
     }
 
     private CacheResponse processLowerTierHit(CacheEntry entry, long now, CacheResponse response) {
+        if (entry.isTombstone()) {
+            metrics.miss();
+            return missResponse(response, "NOT_FOUND");
+        }
         if (entry.isExpired(now)) {
             internalDelete(entry.getKey(), now);
             metrics.expiration();
             metrics.miss();
             return missResponse(response, "EXPIRED");
-        }
-        if (entry.isTombstone()) {
-            metrics.miss();
-            return missResponse(response, "NOT_FOUND");
         }
         
         entry.recordAccess(now, seqCounter.incrementAndGet());
@@ -163,10 +163,12 @@ public class CacheManager {
             isNew = false;
         } else {
             CacheEntry memExisting = memTable.get(key);
-            if (memExisting != null && !memExisting.isTombstone()) {
-                newEntry.setAccessCount(memExisting.getAccessCount());
-                policy.onRemove(memExisting);
-                isNew = false;
+            if (memExisting != null) {
+                if (!memExisting.isTombstone()) {
+                    newEntry.setAccessCount(memExisting.getAccessCount());
+                    policy.onRemove(memExisting);
+                    isNew = false;
+                }
             } else {
                 CacheEntry runExisting = runManager.getNewest(key);
                 if (runExisting != null && !runExisting.isTombstone()) {
