@@ -1,150 +1,105 @@
-# Custom Cache Library with Live Metrics Panel
+<div align="center">
+  <img src="assets/acentra.png" alt="Acentra Health" width="150" style="margin: 0 20px; vertical-align: middle;"/>
+  <img src="assets/rajalakshmi.png" alt="Rajalakshmi Engineering College" width="300" style="margin: 0 20px; vertical-align: middle;"/>
+  <img src="assets/hackforge.png" alt="HACKFORGE.ai" width="150" style="margin: 0 20px; vertical-align: middle;"/>
+</div>
 
-A high-performance, thread-safe, in-memory Java Custom Cache Library with selectable eviction policies (LRU/LFU), per-entry TTL, and a live metrics dashboard.
+<br/>
 
-## Features
+<h1 align="center">CacheFusion</h1>
+<h3 align="center">Adaptive Hybrid Java Cache with Live React Dashboard</h3>
 
-| Minimum requirement | Where it is implemented | How it is verified |
+A high-performance, Log-Structured Merge (LSM) inspired Java Custom Cache Library. It implements a multi-tiered memory architecture to optimize lookup latency while drastically reducing object overhead for cold data. 
+
+Includes selectable eviction policies (LRU/LFU), per-entry TTL, and a live React.js frontend metrics dashboard for real-time visualization.
+
+## 🚀 Minimum Requirements Fulfilled
+
+| Requirement | Implementation Detail | Verified By |
 |---|---|---|
-| In-memory cache | `CacheManager` + `ConcurrentHashMap` | Unit tests + Demo endpoints |
-| LRU eviction | `LRUEvictionPolicy` | `LRUEvictionTest` |
-| LFU eviction | `LFUEvictionPolicy` | `LFUEvictionTest` |
-| Selectable eviction policy | `POST /api/cache/policy` + UI dropdown | `PolicySwitchTest` |
-| Per-entry TTL | `CacheEntry.expiryTime` | `TTLTest` |
-| TTL independent of eviction | TTL lives in `CacheManager`/`CacheEntry`, never in policies | `TTLTest` |
-| Thread-safe concurrent GET/PUT | Single ReentrantLock around compound operations | `ConcurrencyTest` |
-| Frontend metrics panel | `static/index.html`, `style.css`, `app.js` | Live Dashboard |
-| Display cache hit rate & miss rate | Metrics card in UI | `MetricsTest` |
-| Show metrics against a sample pattern | RUN SAMPLE, LRU vs LFU test, compare policies | Demo Endpoints |
+| **In-memory cache** | `CacheManager` coordinating Hot, Warm, and Cold tiers | Unit tests + Live Demo |
+| **LRU eviction strategy** | `LRUEvictionPolicy` (O(1) Custom Doubly Linked List) | `LRUEvictionTest` |
+| **LFU eviction strategy** | `LFUEvictionPolicy` (O(1) Frequency Buckets) | `LFUEvictionTest` |
+| **Selectable eviction policy** | `POST /api/cache/policy` + React UI Dropdown | `PolicySwitchTest` |
+| **Per-entry TTL** | `CacheEntry.expiryTime` | `TTLTest` |
+| **TTL independent of eviction**| TTL uses Lazy Expiration on `GET` and Tombstoning | `TTLTest` |
+| **Thread-safe concurrent access**| Lock-free `ConcurrentHashMap` & `ConcurrentSkipListMap` | `ConcurrencyTest` (50 threads) |
+| **Frontend metrics panel** | React + Vite frontend (`/frontend`) with dynamic polling | Live Dashboard |
+| **Display hit / miss rate** | `CacheMetrics` streamed to React-ChartJS | `MetricsTest` |
+| **Show metrics vs access pattern**| `/demo` endpoints simulating synthetic dynamic loads | Live Dashboard |
 
-## Architecture
+---
 
-```text
-                      CACHE MANAGER
-                           │
-     ┌─────────────────────┼─────────────────────┐
-     ▼                     ▼                     ▼
-  CACHE DATA          TTL LOGIC              METRICS
-(ConcurrentHashMap)  (lazy check in GET  (hits, misses,
-                      + ExpirySweeper)    evictions, expirations)
-                           │
-                    EVICTION POLICY  (interface)
-                     ┌─────┴─────┐
-                     ▼           ▼
-               O(1) LRU      O(1) LFU
-```
+## 🏗️ Architecture: The 3 Tiers
 
-## Thread-Safety
+CacheFusion abandons the traditional monolithic HashMap cache in favor of a hybrid memory hierarchy, inspired by modern LSM Trees.
 
-The cache guarantees thread safety by wrapping all compound operations (check → evict → insert) in a single `ReentrantLock`. While we use `ConcurrentHashMap` for storage, the lock is what truly ensures atomicity of these multi-step cache operations. `ConcurrentHashMap` ensures safe read-only snapshots (for listing entries) and prevents standard concurrent modification exceptions during sweeps. Atomic counters (`AtomicLong`, `LongAdder`) track metrics and sequential access reliably across multiple threads. 
+### 1. Hot Cache (Tier 1: O(1) Latency)
+*   **Data Structure:** `ConcurrentHashMap`
+*   **Purpose:** Houses the most frequently accessed keys. Data is strictly promoted to this layer only after crossing a hit threshold, ensuring pure O(1) lookup speeds for active data.
 
-## Eviction Policies (Caffeine-Inspired O(1) Optimization)
+### 2. Warm Cache / MemTable (Tier 2: O(log n) Writes)
+*   **Data Structure:** `ConcurrentSkipListMap`
+*   **Purpose:** Absorbs all incoming `PUT` requests lock-free. Data is kept naturally sorted without the overhead of rehashing massive hash maps.
 
-Instead of the standard naive O(n) scan, eviction structures have been optimized to O(1) structures reflecting the high-performance design principles of modern caching libraries like Caffeine.
+### 3. Cold Cache / Immutable Runs (Tier 3: Extreme Memory Density)
+*   **Data Structure:** Primitive `CacheEntry[]` arrays.
+*   **Purpose:** When the MemTable fills up, it flushes to an Immutable Run. Arrays lack object-pointer overhead, allowing the cache to store millions of cold items with a fraction of the RAM footprint.
 
-### LRU (Least Recently Used)
-The LRU policy uses an **O(1) Custom Doubly Linked List** tracking the chronological order of accesses. The oldest entry sits at the head, and the newest sits at the tail. Eviction instantly pops the head, and reads push the node to the tail, achieving O(1) operations.
+---
 
-### LFU (Least Frequently Used)
-The LFU policy uses **O(1) Frequency Buckets** paired with a dynamically advancing `minFreq` pointer. Each bucket is represented as a `LinkedHashSet` which naturally resolves ties using LRU logic (insertion order). On reads, entries are hopped from bucket `freq` to `freq + 1` in constant time. 
+## ♻️ Deletion & Compaction
 
-## TTL (Time To Live)
+*   **Logical Deletion (Tombstones):** When you `DELETE` a key, we insert a Tombstone marker instead of blocking readers to physically erase it.
+*   **Pairwise Compaction:** A background `CompactionManager` merges older Immutable Runs periodically (Merge Sort style). During this merge, it discards old versions of keys and permanently drops Tombstoned data, freeing up Java Heap space efficiently.
 
-TTL is handled independently of the eviction policies. Each `CacheEntry` stores an absolute `expiryTime`.
-1. **Lazy Expiry:** On every `GET` or `PUT`, the entry is checked against the current time. If it has expired, it is purged.
-2. **Background Sweep:** A single-threaded daemon `ExpirySweeper` runs periodically (every 5 seconds) to actively remove expired entries, freeing up memory.
-3. **Purge-Before-Evict:** Before electing a victim for eviction when full, the cache purges any newly expired entries.
+---
 
-## How to Run
+## 💻 How to Run
 
 ### Technologies Used
-Java 17+, Maven, Spring Boot 3.x, HTML/CSS/Vanilla JS.
+*   **Backend:** Java 17+, Maven, Spring Boot 3.x
+*   **Frontend:** React, Vite, Tailwind CSS, Chart.js
 
-1. **Compile and Test:**
-   ```bash
-   mvn clean test
-   ```
+### 1. Start the Backend
+```bash
+# In the root directory
+mvn clean test
+mvn spring-boot:run
+```
+*The backend API runs on `http://localhost:8080`*
 
-2. **Start the Server:**
-   ```bash
-   mvn spring-boot:run
-   ```
+### 2. Start the Frontend Dashboard
+```bash
+# In a new terminal, navigate to the frontend directory
+cd frontend
+npm install
+npm run dev
+```
+*The React Dashboard will open on `http://localhost:5173`*
 
-3. **View Dashboard:**
-   Open a browser to [http://localhost:8080](http://localhost:8080)
+---
 
-## API Reference & cURL Examples
+## 📡 API Reference & cURL Examples
 
 ### Single-Key Operations
-
-**GET an entry**
-```bash
-curl -X GET http://localhost:8080/api/cache/entries/user1
-```
-
-**PUT an entry (with TTL)**
-```bash
-curl -X PUT "http://localhost:8080/api/cache/entries/user1?ttl=30" -H "Content-Type: text/plain" -d "Sarvesh"
-```
-
-**DELETE an entry**
-```bash
-curl -X DELETE http://localhost:8080/api/cache/entries/user1
-```
+*   **GET:** `curl -X GET http://localhost:8080/api/cache/entries/K1`
+*   **PUT (with TTL):** `curl -X PUT "http://localhost:8080/api/cache/entries/K1?ttl=60" -d "Value1"`
+*   **DELETE:** `curl -X DELETE http://localhost:8080/api/cache/entries/K1`
 
 ### Cache Management
-
-**LIST all entries**
-```bash
-curl -X GET http://localhost:8080/api/cache/entries
-```
-
-**CLEAR cache**
-```bash
-curl -X DELETE http://localhost:8080/api/cache/entries
-```
-
-**GET metrics**
-```bash
-curl -X GET http://localhost:8080/api/cache/metrics
-```
-
-**RESET metrics**
-```bash
-curl -X POST http://localhost:8080/api/cache/metrics/reset
-```
-
-**SWITCH policy**
-```bash
-curl -X POST "http://localhost:8080/api/cache/policy?policy=LFU"
-```
-
-**CHANGE capacity**
-```bash
-curl -X POST "http://localhost:8080/api/cache/capacity?value=10"
-```
+*   **LIST All (View Tiers):** `curl -X GET http://localhost:8080/api/cache/entries`
+*   **CLEAR:** `curl -X DELETE http://localhost:8080/api/cache/entries`
+*   **GET Metrics:** `curl -X GET http://localhost:8080/api/cache/metrics`
+*   **SWITCH Policy (LRU/LFU):** `curl -X POST "http://localhost:8080/api/cache/policy?policy=LFU"`
+*   **CHANGE Global Capacity:** `curl -X POST "http://localhost:8080/api/cache/capacity?value=100"`
 
 ### Demonstrations
+*   **Run Sample Load (Respects Capacity):** `curl -X POST http://localhost:8080/api/cache/demo`
+*   **Force Eviction:** `curl -X POST http://localhost:8080/api/cache/demo/eviction`
+*   **Test TTL Expiration:** `curl -X POST http://localhost:8080/api/cache/demo/ttl`
 
-**Run Sample Access Pattern**
-```bash
-curl -X POST http://localhost:8080/api/cache/demo
-```
+---
 
-**LRU vs LFU Eviction Test**
-```bash
-curl -X POST http://localhost:8080/api/cache/demo/eviction
-```
-
-**TTL Demo**
-```bash
-curl -X POST http://localhost:8080/api/cache/demo/ttl
-```
-
-**Compare Policies**
-```bash
-curl -X POST "http://localhost:8080/api/cache/demo/compare?pattern=zipf"
-```
-
-## Limitations
-* Single-node, purely in-memory cache (no persistence).
+## 📚 Complete System Documentation
+A full deep-dive into the algorithms, use cases, and Mermaid flowcharts of the GET/PUT pipelines can be found in the included `CacheFusion_Documentation.md` file.
