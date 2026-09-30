@@ -43,8 +43,9 @@ CacheFusion abandons the traditional monolithic HashMap cache in favor of a hybr
 *   **Purpose:** Absorbs all incoming `PUT` requests lock-free. Data is kept naturally sorted without the overhead of rehashing massive hash maps.
 
 ### 3. Cold Cache / Immutable Runs (Tier 3: Extreme Memory Density)
-*   **Data Structure:** Primitive `CacheEntry[]` arrays.
+*   **Data Structure:** Primitive `CacheEntry[]` arrays paired with **Bloom Filters**.
 *   **Purpose:** When the MemTable fills up, it flushes to an Immutable Run. Arrays lack object-pointer overhead, allowing the cache to store millions of cold items with a fraction of the RAM footprint.
+*   **Read Optimization (Bloom Filters):** Every Immutable Run generates a mathematically optimized bit-array Bloom Filter (1% false-positive rate). When a `GET` request queries the cold tier, it checks the Bloom Filter first. If the key is absent, it skips the binary search entirely, resulting in lightning-fast $O(1)$ negative lookups.
 
 ---
 
