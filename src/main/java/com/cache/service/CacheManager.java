@@ -255,13 +255,13 @@ public class CacheManager {
         this.policyType = type;
         this.policy = PolicyFactory.create(type);
         
-        List<CacheEntry> allEntries = new ArrayList<>(hotCache.values());
-        
-        // Add from memTable (skipping tombstones)
-        // memTable is private, but we can add a method or just rely on the API
-        // For testing purposes, we can just add a getter or use the fact that they are accessible if we exposed them.
-        // Let's iterate using an internal method if possible.
-        // Actually, for MVP it's fine if setPolicy only tracks hotCache, we just need to fix PolicySwitchTest to only test what it tracks, OR we can add a getter to MemTable.
+        // Repopulate the new policy with all currently live entries
+        for (EntryView view : listEntries()) {
+            if ("LIVE".equals(view.getStatus())) {
+                CacheEntry dummy = new CacheEntry(view.getKey(), view.getValue(), 0, 0, view.getAccessCount(), view.getLastAccessTime(), 0);
+                this.policy.onPut(dummy);
+            }
+        }
     }
     
     public synchronized void setCapacity(int newCapacity) {
@@ -327,11 +327,13 @@ public class CacheManager {
         long now = clock.getAsLong();
         int removed = 0;
         List<String> toRemove = new ArrayList<>();
-        for (CacheEntry entry : hotCache.values()) {
-            if (entry.isExpired(now)) {
-                toRemove.add(entry.getKey());
+        
+        for (EntryView view : listEntries()) {
+            if ("EXPIRED".equals(view.getStatus())) {
+                toRemove.add(view.getKey());
             }
         }
+        
         for (String k : toRemove) {
             if (internalDelete(k, now)) {
                 metrics.expiration();
