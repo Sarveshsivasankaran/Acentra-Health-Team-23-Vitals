@@ -7,14 +7,16 @@ public class EntryView {
     private final long accessCount;
     private final long lastAccessTime;
     private final String status; // "LIVE" or "EXPIRED"
+    private final String tier;
 
-    public EntryView(String key, String value, long remainingTtlSeconds, long accessCount, long lastAccessTime, String status) {
+    public EntryView(String key, String value, long remainingTtlSeconds, long accessCount, long lastAccessTime, String status, String tier) {
         this.key = key;
         this.value = value;
         this.remainingTtlSeconds = remainingTtlSeconds;
         this.accessCount = accessCount;
         this.lastAccessTime = lastAccessTime;
         this.status = status;
+        this.tier = tier;
     }
 
     public String getKey() {
@@ -39,5 +41,9 @@ public class EntryView {
 
     public String getStatus() {
         return status;
+    }
+
+    public String getTier() {
+        return tier;
     }
 }

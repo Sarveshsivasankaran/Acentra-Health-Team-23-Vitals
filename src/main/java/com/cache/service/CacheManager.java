@@ -292,25 +292,42 @@ public class CacheManager {
     
     public List<EntryView> listEntries() {
         long now = clock.getAsLong();
-        List<EntryView> result = new ArrayList<>();
-        for (CacheEntry entry : hotCache.values()) {
-            addEntryView(result, entry, now);
+        java.util.Map<String, EntryView> latestEntries = new java.util.HashMap<>();
+
+        List<ImmutableRun> runs = runManager.getRuns();
+        for (int i = runs.size() - 1; i >= 0; i--) {
+            ImmutableRun run = runs.get(i);
+            for (CacheEntry entry : run.getEntries()) {
+                addEntryViewToMap(latestEntries, entry, now, "L3 (Cold)");
+            }
         }
-        // Simplified for MVP UI
-        return result; 
+
+        for (CacheEntry entry : memTable.getEntries()) {
+            addEntryViewToMap(latestEntries, entry, now, "L2 (Warm)");
+        }
+
+        for (CacheEntry entry : hotCache.values()) {
+            addEntryViewToMap(latestEntries, entry, now, "L1 (Hot)");
+        }
+
+        return new ArrayList<>(latestEntries.values());
     }
     
-    private void addEntryView(List<EntryView> result, CacheEntry entry, long now) {
-        if (entry.isTombstone()) return;
+    private void addEntryViewToMap(java.util.Map<String, EntryView> map, CacheEntry entry, long now, String tier) {
+        if (entry.isTombstone()) {
+            map.remove(entry.getKey());
+            return;
+        }
         String status = entry.isExpired(now) ? "EXPIRED" : "LIVE";
         long remainingSec = entry.remainingTtlSeconds(now);
-        result.add(new EntryView(
+        map.put(entry.getKey(), new EntryView(
             entry.getKey(), 
             entry.getValue(), 
             remainingSec, 
             entry.getAccessCount(), 
             entry.getLastAccessTime(), 
-            status
+            status,
+            tier
         ));
     }
     

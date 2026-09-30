@@ -97,4 +97,8 @@ public class SkipListMemTable {
             flushLock.writeLock().unlock();
         }
     }
+
+    public List<CacheEntry> getEntries() {
+        return new ArrayList<>(activeMap.values());
+    }
 }
